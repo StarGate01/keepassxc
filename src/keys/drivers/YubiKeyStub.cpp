@@ -22,11 +22,7 @@ YubiKey::YubiKey()
 {
 }
 
-YubiKey::~YubiKey()
-{
-}
-
-YubiKey* YubiKey::m_instance(nullptr);
+YubiKey* YubiKey::m_instance(Q_NULLPTR);
 
 YubiKey* YubiKey::instance()
 {
@@ -62,6 +58,13 @@ QString YubiKey::errorMessage()
     return {};
 }
 
+bool YubiKey::testChallenge(YubiKeySlot slot, bool* wouldBlock)
+{
+    Q_UNUSED(slot);
+    Q_UNUSED(wouldBlock);
+    return false;
+}
+
 YubiKey::ChallengeResult YubiKey::challenge(YubiKeySlot slot, const QByteArray& chal, Botan::secure_vector<char>& resp)
 {
     Q_UNUSED(slot);
@@ -69,11 +72,4 @@ YubiKey::ChallengeResult YubiKey::challenge(YubiKeySlot slot, const QByteArray& 
     Q_UNUSED(resp);
 
     return YubiKey::ChallengeResult::YCR_ERROR;
-}
-
-bool YubiKey::testChallenge(YubiKeySlot slot, bool* wouldBlock)
-{
-    Q_UNUSED(slot);
-    Q_UNUSED(wouldBlock);
-    return false;
 }

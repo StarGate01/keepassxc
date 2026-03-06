@@ -52,7 +52,7 @@ protected:
 
 private slots:
     void hardwareKeyResponse(bool found);
-    void pollYubikey();
+    void pollYubikey(bool manualTrigger = false);
 
 private:
     const QScopedPointer<Ui::YubiKeyEditWidget> m_compUi;
@@ -61,6 +61,7 @@ private:
     QPointer<DeviceListener> m_deviceListener;
 #endif
     bool m_isDetected = false;
+    bool m_manualHardwareKeyRefresh = false;
 };
 
 #endif // KEEPASSXC_YUBIKEYEDITWIDGET_H

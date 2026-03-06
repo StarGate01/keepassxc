@@ -24,6 +24,8 @@
 #include "gui/Icons.h"
 #include "keys/ChallengeResponseKey.h"
 #include "keys/CompositeKey.h"
+
+#include <QSet>
 #ifdef WITH_XC_YUBIKEY
 #include "keys/drivers/YubiKeyInterfaceUSB.h"
 #endif
@@ -63,14 +65,19 @@ bool YubiKeyEditWidget::validate(QString& errorMessage) const
         return false;
     }
 
-    // Perform a test challenge response
+    // Perform a test challenge response using challenge() which has proper
+    // retry logic and user interaction signals for NFC keys
     int selectionIndex = m_compUi->comboChallengeResponse->currentIndex();
     auto slot = m_compUi->comboChallengeResponse->itemData(selectionIndex).value<YubiKeySlot>();
-    bool valid = AsyncTask::runAndWaitForFuture([&slot] { return YubiKey::instance()->testChallenge(slot); });
-    if (!valid) {
+    auto result = AsyncTask::runAndWaitForFuture([&slot] {
+        Botan::secure_vector<char> response;
+        return YubiKey::instance()->challenge(slot, QByteArray(1, 0x00), response);
+    });
+    if (result != YubiKey::ChallengeResult::YCR_SUCCESS) {
         errorMessage = tr("Selected hardware key slot does not support challenge-response!");
+        return false;
     }
-    return valid;
+    return true;
 }
 
 QWidget* YubiKeyEditWidget::componentEditWidget()
@@ -123,7 +130,7 @@ void YubiKeyEditWidget::initComponentEditWidget(QWidget* widget)
     Q_ASSERT(m_compEditWidget);
     m_compUi->comboChallengeResponse->setFocus();
     m_compUi->refreshHardwareKeys->setIcon(icons()->icon("yubikey-refresh", true));
-    connect(m_compUi->refreshHardwareKeys, &QPushButton::clicked, this, &YubiKeyEditWidget::pollYubikey);
+    connect(m_compUi->refreshHardwareKeys, &QPushButton::clicked, this, [this] { pollYubikey(true); });
     pollYubikey();
 }
 
@@ -144,7 +151,7 @@ void YubiKeyEditWidget::initComponent()
            "Challenge-Response</a>.</p>"));
 }
 
-void YubiKeyEditWidget::pollYubikey()
+void YubiKeyEditWidget::pollYubikey(bool manualTrigger)
 {
 #ifdef WITH_XC_YUBIKEY
     if (!m_compEditWidget) {
@@ -152,8 +159,13 @@ void YubiKeyEditWidget::pollYubikey()
     }
 
     m_isDetected = false;
-    m_compUi->comboChallengeResponse->clear();
-    m_compUi->comboChallengeResponse->addItem(tr("Detecting hardware keys…"));
+    m_manualHardwareKeyRefresh = manualTrigger;
+    // Only clear for manual refresh; automatic detection preserves existing keys
+    // (NFC keys may disconnect intermittently)
+    if (manualTrigger) {
+        m_compUi->comboChallengeResponse->clear();
+        m_compUi->comboChallengeResponse->addItem(tr("Detecting hardware keys…"));
+    }
     m_compUi->comboChallengeResponse->setEnabled(false);
     m_compUi->yubikeyProgress->setVisible(true);
     m_compUi->refreshHardwareKeys->setEnabled(false);
@@ -168,11 +180,27 @@ void YubiKeyEditWidget::hardwareKeyResponse(bool found)
         return;
     }
 
-    m_compUi->comboChallengeResponse->clear();
     m_compUi->refreshHardwareKeys->setEnabled(true);
 
-    if (!found) {
+    // Collect existing keys from the combo box
+    QSet<YubiKeySlot> existingSlots;
+    for (int i = 0; i < m_compUi->comboChallengeResponse->count(); ++i) {
+        auto data = m_compUi->comboChallengeResponse->itemData(i);
+        if (data.isValid()) { // Skip placeholder items (no user data)
+            existingSlots.insert(data.value<YubiKeySlot>());
+        }
+    }
+
+    // Manual refresh rebuilds the list completely; automatic device detection
+    // preserves existing keys (NFC keys may disconnect intermittently)
+    if (m_manualHardwareKeyRefresh) {
+        m_compUi->comboChallengeResponse->clear();
+        existingSlots.clear();
+    }
+
+    if (!found && existingSlots.isEmpty()) {
         m_compUi->yubikeyProgress->setVisible(false);
+        m_compUi->comboChallengeResponse->clear();
         m_compUi->comboChallengeResponse->addItem(YubiKey::instance()->connectedKeys() > 0
                                                       ? tr("Hardware keys found, but no slots are configured")
                                                       : tr("No hardware keys detected"));
@@ -180,10 +208,17 @@ void YubiKeyEditWidget::hardwareKeyResponse(bool found)
         return;
     }
 
+    // Remove the placeholder "Detecting hardware keys..." item if present
+    if (m_compUi->comboChallengeResponse->count() > 0 && !m_compUi->comboChallengeResponse->itemData(0).isValid()) {
+        m_compUi->comboChallengeResponse->clear();
+    }
+
     const auto foundKeys = YubiKey::instance()->foundKeys();
     for (auto i = foundKeys.cbegin(); i != foundKeys.cend(); ++i) {
-        // add detected YubiKey to combo box and encode blocking mode in LSB, slot number in second LSB
-        m_compUi->comboChallengeResponse->addItem(i.value(), QVariant::fromValue(i.key()));
+        // Only add keys that aren't already in the combo box
+        if (!existingSlots.contains(i.key())) {
+            m_compUi->comboChallengeResponse->addItem(i.value(), QVariant::fromValue(i.key()));
+        }
     }
 
     m_isDetected = true;

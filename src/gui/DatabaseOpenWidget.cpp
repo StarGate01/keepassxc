@@ -34,6 +34,7 @@
 #include <QCloseEvent>
 #include <QDesktopServices>
 #include <QFont>
+#include <QSet>
 
 namespace
 {
@@ -575,10 +576,22 @@ void DatabaseOpenWidget::hardwareKeyResponse(bool found)
     m_ui->useHardwareKeyCheckBox->setEnabled(true);
     m_ui->hardwareKeyProgress->setVisible(false);
     m_ui->refreshHardwareKeys->setEnabled(true);
-    m_ui->hardwareKeyCombo->clear();
     m_pollingHardwareKey = false;
 
-    if (!found) {
+    // Collect existing keys from the combo box
+    QSet<YubiKeySlot> existingSlots;
+    for (int i = 0; i < m_ui->hardwareKeyCombo->count(); ++i) {
+        existingSlots.insert(m_ui->hardwareKeyCombo->itemData(i).value<YubiKeySlot>());
+    }
+
+    // Manual refresh rebuilds the list completely; automatic device detection
+    // preserves existing keys (NFC keys may disconnect intermittently)
+    if (m_manualHardwareKeyRefresh) {
+        m_ui->hardwareKeyCombo->clear();
+        existingSlots.clear();
+    }
+
+    if (!found && existingSlots.isEmpty()) {
         toggleHardwareKeyComponent(false);
         return;
     }
@@ -596,15 +609,28 @@ void DatabaseOpenWidget::hardwareKeyResponse(bool found)
         }
     }
 
-    int selectedIndex = 0;
+    int selectedIndex = m_ui->hardwareKeyCombo->currentIndex();
     const auto foundKeys = YubiKey::instance()->foundKeys();
     for (auto i = foundKeys.cbegin(); i != foundKeys.cend(); ++i) {
-        // add detected YubiKey to combo box
-        m_ui->hardwareKeyCombo->addItem(i.value(), QVariant::fromValue(i.key()));
+        // Only add keys that aren't already in the combo box
+        if (!existingSlots.contains(i.key())) {
+            m_ui->hardwareKeyCombo->addItem(i.value(), QVariant::fromValue(i.key()));
+        }
         // Select this YubiKey + Slot if we used it in the past
         if (lastUsedSlot == i.key()) {
-            selectedIndex = m_ui->hardwareKeyCombo->count() - 1;
+            // Find the index of this key in the combo box
+            for (int j = 0; j < m_ui->hardwareKeyCombo->count(); ++j) {
+                if (m_ui->hardwareKeyCombo->itemData(j).value<YubiKeySlot>() == i.key()) {
+                    selectedIndex = j;
+                    break;
+                }
+            }
         }
+    }
+
+    // If no selection was made yet, select the first item
+    if (selectedIndex < 0 && m_ui->hardwareKeyCombo->count() > 0) {
+        selectedIndex = 0;
     }
 
     toggleHardwareKeyComponent(true);

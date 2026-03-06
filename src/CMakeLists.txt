@@ -280,6 +280,7 @@ if(WITH_XC_YUBIKEY)
     list(APPEND gui_SOURCES
         gui/osutils/DeviceListenerBase.h
         gui/osutils/DeviceListener.cpp
+        gui/osutils/DeviceListenerPCSC.cpp
         gui/osutils/PCSCUtils.cpp)
     if(APPLE)
         list(APPEND gui_SOURCES gui/osutils/macutils/DeviceListenerMac.cpp)

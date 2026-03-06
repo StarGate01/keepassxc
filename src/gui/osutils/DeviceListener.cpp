@@ -25,11 +25,16 @@
 #include "nixutils/DeviceListenerLibUsb.h"
 #endif
 
+#include "DeviceListenerPCSC.h"
+
 #include <QTimer>
 
 DeviceListener::DeviceListener(QWidget* parent)
     : DeviceListenerBase(parent)
 {
+    auto* pcscListener = new DeviceListenerPCSC(this);
+    m_listeners.append(pcscListener);
+    connectSignals(pcscListener);
 
 #if defined(Q_OS_MACOS)
     auto* usbListener = new DeviceListenerMac(this);

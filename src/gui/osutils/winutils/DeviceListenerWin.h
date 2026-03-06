@@ -18,14 +18,13 @@
 #ifndef DEVICELISTENER_WIN_H
 #define DEVICELISTENER_WIN_H
 
-#define DEVICELISTENER_IMPL DeviceListenerWin
+#include "gui/osutils/DeviceListenerBase.h"
 
 #include <QAbstractNativeEventFilter>
 #include <QRegularExpression>
 #include <QUuid>
-#include <QWidget>
 
-class DeviceListenerWin : public QObject, public QAbstractNativeEventFilter
+class DeviceListenerWin : public DeviceListenerBase, public QAbstractNativeEventFilter
 {
     Q_OBJECT
 
@@ -43,15 +42,12 @@ public:
 
     void registerHotplugCallback(bool arrived,
                                  bool left,
-                                 int vendorId = -1,
-                                 int productId = -1,
-                                 const QUuid* deviceClass = nullptr);
-    void deregisterHotplugCallback();
+                                 int vendorId = MATCH_ANY,
+                                 int productId = MATCH_ANY,
+                                 const QUuid* deviceClass = nullptr) override;
+    void deregisterAllHotplugCallbacks() override;
 
     bool nativeEventFilter(const QByteArray& eventType, void* message, long*) override;
-
-signals:
-    void devicePlugged(bool state, void* ctx, void* device);
 
 private:
     void* m_deviceNotifyHandle = nullptr;

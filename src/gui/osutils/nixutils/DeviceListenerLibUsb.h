@@ -18,36 +18,31 @@
 #ifndef DEVICELISTENER_LIBUSB_H
 #define DEVICELISTENER_LIBUSB_H
 
-#define DEVICELISTENER_IMPL DeviceListenerLibUsb
+#include "gui/osutils/DeviceListenerBase.h"
 
 #include <QAtomicInt>
 #include <QFuture>
 #include <QSet>
-#include <QWidget>
 
-class QUuid;
-
-class DeviceListenerLibUsb : public QObject
+class DeviceListenerLibUsb : public DeviceListenerBase
 {
     Q_OBJECT
 
 public:
-    typedef qintptr Handle;
     explicit DeviceListenerLibUsb(QWidget* parent);
     DeviceListenerLibUsb(const DeviceListenerLibUsb&) = delete;
     ~DeviceListenerLibUsb() override;
 
-    Handle
-    registerHotplugCallback(bool arrived, bool left, int vendorId = -1, int productId = -1, const QUuid* = nullptr);
-    void deregisterHotplugCallback(Handle handle);
-    void deregisterAllHotplugCallbacks();
-
-signals:
-    void devicePlugged(bool state, void* ctx, void* device);
+    void registerHotplugCallback(bool arrived,
+                                 bool left,
+                                 int vendorId = MATCH_ANY,
+                                 int productId = MATCH_ANY,
+                                 const QUuid* deviceClass = nullptr) override;
+    void deregisterAllHotplugCallbacks() override;
 
 private:
     void* m_ctx;
-    QSet<Handle> m_callbackHandles;
+    QSet<qintptr> m_callbackHandles;
     QFuture<void> m_usbEvents;
     QAtomicInt m_completed;
 };

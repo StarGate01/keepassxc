@@ -24,7 +24,7 @@
 #include <libusb.h>
 
 DeviceListenerLibUsb::DeviceListenerLibUsb(QWidget* parent)
-    : QObject(parent)
+    : DeviceListenerBase(parent)
     , m_ctx(nullptr)
     , m_completed(false)
 {
@@ -50,13 +50,12 @@ namespace
     }
 } // namespace
 
-DeviceListenerLibUsb::Handle
-DeviceListenerLibUsb::registerHotplugCallback(bool arrived, bool left, int vendorId, int productId, const QUuid*)
+void DeviceListenerLibUsb::registerHotplugCallback(bool arrived, bool left, int vendorId, int productId, const QUuid*)
 {
     if (!m_ctx) {
         if (libusb_init(reinterpret_cast<libusb_context**>(&m_ctx)) != LIBUSB_SUCCESS) {
             qWarning("Unable to initialize libusb. USB devices may not be detected properly.");
-            return 0;
+            return;
         }
     }
 
@@ -68,7 +67,7 @@ DeviceListenerLibUsb::registerHotplugCallback(bool arrived, bool left, int vendo
         events |= LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT;
     }
 
-    Handle handle = 0;
+    qintptr handle = 0;
     auto* handleNative = reinterpret_cast<libusb_hotplug_callback_handle*>(&handle);
     const QPointer that = this;
     const int ret = libusb_hotplug_register_callback(
@@ -104,31 +103,26 @@ DeviceListenerLibUsb::registerHotplugCallback(bool arrived, bool left, int vendo
             m_usbEvents = QtConcurrent::run(handleUsbEvents, static_cast<libusb_context*>(m_ctx), &m_completed);
         }
     }
-    return handle;
-}
-
-void DeviceListenerLibUsb::deregisterHotplugCallback(Handle handle)
-{
-    if (!m_ctx || !m_callbackHandles.contains(handle)) {
-        return;
-    }
-#ifdef Q_OS_FREEBSD
-    auto* handleNative = reinterpret_cast<libusb_hotplug_callback_handle>(handle);
-#else
-    auto handleNative = static_cast<libusb_hotplug_callback_handle>(handle);
-#endif
-    libusb_hotplug_deregister_callback(static_cast<libusb_context*>(m_ctx), handleNative);
-    m_callbackHandles.remove(handle);
-
-    if (m_callbackHandles.isEmpty() && m_usbEvents.isRunning()) {
-        m_completed = true;
-        m_usbEvents.waitForFinished();
-    }
 }
 
 void DeviceListenerLibUsb::deregisterAllHotplugCallbacks()
 {
-    while (!m_callbackHandles.isEmpty()) {
-        deregisterHotplugCallback(*m_callbackHandles.constBegin());
+    if (!m_ctx) {
+        return;
+    }
+
+    for (auto handle : m_callbackHandles) {
+#ifdef Q_OS_FREEBSD
+        auto* handleNative = reinterpret_cast<libusb_hotplug_callback_handle>(handle);
+#else
+        auto handleNative = static_cast<libusb_hotplug_callback_handle>(handle);
+#endif
+        libusb_hotplug_deregister_callback(static_cast<libusb_context*>(m_ctx), handleNative);
+    }
+    m_callbackHandles.clear();
+
+    if (m_usbEvents.isRunning()) {
+        m_completed = true;
+        m_usbEvents.waitForFinished();
     }
 }

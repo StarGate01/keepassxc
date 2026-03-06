@@ -18,61 +18,34 @@
 #ifndef DEVICELISTENER_H
 #define DEVICELISTENER_H
 
-#include <QHash>
-#include <QPair>
+#include <QList>
 #include <QPointer>
 #include <QWidget>
 
-#if defined(Q_OS_WIN)
-#include "winutils/DeviceListenerWin.h"
-#elif defined(Q_OS_MACOS)
-#include "macutils/DeviceListenerMac.h"
-#elif defined(Q_OS_UNIX)
-#include "nixutils/DeviceListenerLibUsb.h"
-#endif
+#include "DeviceListenerBase.h"
 
 class QUuid;
 
-class DeviceListener : public QWidget
+class DeviceListener : public DeviceListenerBase
 {
     Q_OBJECT
 
 public:
-    typedef qintptr Handle;
-    static constexpr int MATCH_ANY = -1;
-
     explicit DeviceListener(QWidget* parent);
     DeviceListener(const DeviceListener&) = delete;
     ~DeviceListener() override;
 
-    /**
-     * Register a hotplug notification callback.
-     *
-     * Fires devicePlugged() or deviceUnplugged() when the state of a matching device changes.
-     * The signals are supplied with the platform-specific context and ID of the firing device.
-     * Registering a new callback with the same DeviceListener will unregister any previous callbacks.
-     *
-     * @param arrived listen for new devices
-     * @param left listen for device unplug
-     * @param vendorId vendor ID to listen for or DeviceListener::MATCH_ANY
-     * @param productId product ID to listen for or DeviceListener::MATCH_ANY
-     * @param deviceClass device class GUID (Windows only)
-     * @return callback handle
-     */
-    Handle registerHotplugCallback(bool arrived,
-                                   bool left,
-                                   int vendorId = MATCH_ANY,
-                                   int productId = MATCH_ANY,
-                                   const QUuid* deviceClass = nullptr);
-    void deregisterHotplugCallback(Handle handle);
-    void deregisterAllHotplugCallbacks();
-
-signals:
-    void devicePlugged(bool state, void* ctx, void* device);
+    void registerHotplugCallback(bool arrived,
+                                 bool left,
+                                 int vendorId = MATCH_ANY,
+                                 int productId = MATCH_ANY,
+                                 const QUuid* deviceClass = nullptr) override;
+    void deregisterAllHotplugCallbacks() override;
 
 private:
-    QHash<Handle, QPointer<DEVICELISTENER_IMPL>> m_listeners;
-    void connectSignals(DEVICELISTENER_IMPL* listener);
+    QList<QPointer<DeviceListenerBase>> m_listeners;
+
+    void connectSignals(DeviceListenerBase* listener);
 };
 
 #endif // DEVICELISTENER_H

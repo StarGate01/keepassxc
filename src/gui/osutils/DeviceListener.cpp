@@ -16,63 +16,62 @@
  */
 
 #include "DeviceListener.h"
+
+#if defined(Q_OS_WIN)
+#include "winutils/DeviceListenerWin.h"
+#elif defined(Q_OS_MACOS)
+#include "macutils/DeviceListenerMac.h"
+#elif defined(Q_OS_UNIX)
+#include "nixutils/DeviceListenerLibUsb.h"
+#endif
+
 #include <QTimer>
 
 DeviceListener::DeviceListener(QWidget* parent)
-    : QWidget(parent)
+    : DeviceListenerBase(parent)
 {
-#if defined(Q_OS_UNIX) && !defined(Q_OS_MACOS)
-    m_listeners[0] = new DEVICELISTENER_IMPL(this);
-    connectSignals(m_listeners[0]);
+
+#if defined(Q_OS_MACOS)
+    auto* usbListener = new DeviceListenerMac(this);
+#elif defined(Q_OS_WIN)
+    auto* usbListener = new DeviceListenerWin(this);
+#elif defined(Q_OS_UNIX)
+    auto* usbListener = new DeviceListenerLibUsb(this);
 #endif
+    m_listeners.append(usbListener);
+    connectSignals(usbListener);
 }
 
 DeviceListener::~DeviceListener()
 {
 }
 
-void DeviceListener::connectSignals(DEVICELISTENER_IMPL* listener)
+void DeviceListener::connectSignals(DeviceListenerBase* listener)
 {
-    connect(listener, &DEVICELISTENER_IMPL::devicePlugged, this, [&](bool state, void* ctx, void* device) {
+    connect(listener, &DeviceListenerBase::devicePlugged, this, [this](bool state, void* ctx, void* device) {
         // Wait a few ms to prevent USB device access conflicts
-        QTimer::singleShot(50, this, [&] { emit devicePlugged(state, ctx, device); });
+        QTimer::singleShot(50, this, [this, state, ctx, device] { emit devicePlugged(state, ctx, device); });
     });
 }
 
-DeviceListener::Handle
-DeviceListener::registerHotplugCallback(bool arrived, bool left, int vendorId, int productId, const QUuid* deviceClass)
+void DeviceListener::registerHotplugCallback(bool arrived,
+                                             bool left,
+                                             int vendorId,
+                                             int productId,
+                                             const QUuid* deviceClass)
 {
-#if defined(Q_OS_UNIX) && !defined(Q_OS_MACOS)
-    const Handle handle = m_listeners[0]->registerHotplugCallback(arrived, left, vendorId, productId, deviceClass);
-#else
-    auto* listener = new DEVICELISTENER_IMPL(this);
-    const auto handle = reinterpret_cast<Handle>(listener);
-    m_listeners[handle] = listener;
-    m_listeners[handle]->registerHotplugCallback(arrived, left, vendorId, productId, deviceClass);
-    connectSignals(m_listeners[handle]);
-#endif
-    return handle;
-}
-
-void DeviceListener::deregisterHotplugCallback(Handle handle)
-{
-#if defined(Q_OS_UNIX) && !defined(Q_OS_MACOS)
-    m_listeners[0]->deregisterHotplugCallback(handle);
-#else
-    if (m_listeners.contains(handle)) {
-        m_listeners[handle]->deregisterHotplugCallback();
-        m_listeners.remove(handle);
+    for (auto& listener : m_listeners) {
+        if (listener) {
+            listener->registerHotplugCallback(arrived, left, vendorId, productId, deviceClass);
+        }
     }
-#endif
 }
 
 void DeviceListener::deregisterAllHotplugCallbacks()
 {
-#if defined(Q_OS_UNIX) && !defined(Q_OS_MACOS)
-    m_listeners[0]->deregisterAllHotplugCallbacks();
-#else
-    while (!m_listeners.isEmpty()) {
-        deregisterHotplugCallback(m_listeners.constBegin().key());
+    for (auto& listener : m_listeners) {
+        if (listener) {
+            listener->deregisterAllHotplugCallbacks();
+        }
     }
-#endif
 }

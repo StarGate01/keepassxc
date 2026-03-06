@@ -25,16 +25,14 @@
 #include <dbt.h>
 
 DeviceListenerWin::DeviceListenerWin(QWidget* parent)
-    : QObject(parent)
+    : DeviceListenerBase(parent)
 {
-    // Event listeners need a valid window reference
-    Q_ASSERT(parent);
     QCoreApplication::instance()->installNativeEventFilter(this);
 }
 
 DeviceListenerWin::~DeviceListenerWin()
 {
-    deregisterHotplugCallback();
+    deregisterAllHotplugCallbacks();
 }
 
 void DeviceListenerWin::registerHotplugCallback(bool arrived,
@@ -46,7 +44,7 @@ void DeviceListenerWin::registerHotplugCallback(bool arrived,
     Q_ASSERT(deviceClass);
 
     if (m_deviceNotifyHandle) {
-        deregisterHotplugCallback();
+        deregisterAllHotplugCallbacks();
     }
 
     QString regex = R"(^\\{2}\?\\[A-Z]+#)";
@@ -70,7 +68,7 @@ void DeviceListenerWin::registerHotplugCallback(bool arrived,
     m_handleRemoval = left;
 }
 
-void DeviceListenerWin::deregisterHotplugCallback()
+void DeviceListenerWin::deregisterAllHotplugCallbacks()
 {
     if (m_deviceNotifyHandle) {
         UnregisterDeviceNotification(m_deviceNotifyHandle);

@@ -17,11 +17,11 @@
 
 #include "DeviceListenerMac.h"
 
-#include <QPointer>
 #include <IOKit/IOKitLib.h>
+#include <QPointer>
 
-DeviceListenerMac::DeviceListenerMac(QObject* parent)
-    : QObject(parent)
+DeviceListenerMac::DeviceListenerMac(QWidget* parent)
+    : DeviceListenerBase(parent)
     , m_mgr(nullptr)
 {
 }
@@ -66,14 +66,20 @@ void DeviceListenerMac::registerHotplugCallback(bool arrived, bool left, int ven
 
     QPointer that = this;
     if (arrived) {
-        IOHIDManagerRegisterDeviceMatchingCallback(m_mgr, [](void* ctx, IOReturn, void*, IOHIDDeviceRef device) {
-            static_cast<DeviceListenerMac*>(ctx)->onDeviceStateChanged(true, device);
-        }, that);
+        IOHIDManagerRegisterDeviceMatchingCallback(
+            m_mgr,
+            [](void* ctx, IOReturn, void*, IOHIDDeviceRef device) {
+                static_cast<DeviceListenerMac*>(ctx)->onDeviceStateChanged(true, device);
+            },
+            that);
     }
     if (left) {
-        IOHIDManagerRegisterDeviceRemovalCallback(m_mgr, [](void* ctx, IOReturn, void*, IOHIDDeviceRef device) {
-            static_cast<DeviceListenerMac*>(ctx)->onDeviceStateChanged(true, device);
-        }, that);
+        IOHIDManagerRegisterDeviceRemovalCallback(
+            m_mgr,
+            [](void* ctx, IOReturn, void*, IOHIDDeviceRef device) {
+                static_cast<DeviceListenerMac*>(ctx)->onDeviceStateChanged(true, device);
+            },
+            that);
     }
 
     if (IOHIDManagerOpen(m_mgr, kIOHIDOptionsTypeNone) != kIOReturnSuccess) {
@@ -81,7 +87,7 @@ void DeviceListenerMac::registerHotplugCallback(bool arrived, bool left, int ven
     }
 }
 
-void DeviceListenerMac::deregisterHotplugCallback()
+void DeviceListenerMac::deregisterAllHotplugCallbacks()
 {
     if (m_mgr) {
         IOHIDManagerRegisterDeviceMatchingCallback(m_mgr, nullptr, this);

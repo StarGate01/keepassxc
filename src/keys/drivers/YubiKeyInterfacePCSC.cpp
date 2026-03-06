@@ -19,332 +19,13 @@
 
 #include "core/Tools.h"
 #include "crypto/Random.h"
+#include "gui/osutils/PCSCUtils.h"
 
 #include <QScopeGuard>
 
-// MSYS2 does not define these macros
-// So set them to the value used by pcsc-lite
-#ifndef MAX_ATR_SIZE
-#define MAX_ATR_SIZE 33
-#endif
-#ifndef MAX_READERNAME
-#define MAX_READERNAME 128
-#endif
-
-// PCSC framework on OSX uses unsigned int
-// Windows winscard and Linux pcsc-lite use unsigned long
-#ifdef Q_OS_MACOS
-typedef uint32_t SCUINT;
-typedef uint32_t RETVAL;
-#else
-typedef unsigned long SCUINT;
-typedef long RETVAL;
-#endif
-
-// This namescape contains static wrappers for the smart card API
-// Which enable the communication with a Yubikey via PCSC ADPUs
+// This namespace contains YubiKey-specific PC/SC APDU wrappers
 namespace
 {
-
-    /***
-     * @brief Check if a smartcard API context is valid and reopen it if it is not
-     *
-     * @param context Smartcard API context, valid or not
-     * @return SCARD_S_SUCCESS on success
-     */
-    RETVAL ensureValidContext(SCARDCONTEXT& context)
-    {
-        // This check only tests if the handle pointer is valid in memory
-        // but it does not actually verify that it works
-        RETVAL rv = SCardIsValidContext(context);
-
-        // If the handle is broken, create it
-        // This happens e.g. on application launch
-        if (rv != SCARD_S_SUCCESS) {
-            rv = SCardEstablishContext(SCARD_SCOPE_SYSTEM, nullptr, nullptr, &context);
-            if (rv != SCARD_S_SUCCESS) {
-                return rv;
-            }
-        }
-
-        // Verify the handle actually works
-        SCUINT dwReaders = 0;
-        rv = SCardListReaders(context, nullptr, nullptr, &dwReaders);
-        // On windows, USB hot-plugging causes the underlying API server to die
-        // So on every USB unplug event, the API context has to be recreated
-        // On Linux, restarting the pcsc daemon causes the API server to die as well
-        if (rv == SCARD_E_SERVICE_STOPPED || rv == SCARD_E_NO_SERVICE) {
-            // Dont care if the release works since the handle might be broken
-            SCardReleaseContext(context);
-            rv = SCardEstablishContext(SCARD_SCOPE_SYSTEM, nullptr, nullptr, &context);
-        }
-
-        return rv;
-    }
-
-    /***
-     * @brief return the names of all connected smartcard readers
-     *
-     * @param context A pre-established smartcard API context
-     * @return New list of smartcard readers
-     */
-    QList<QString> getReaders(SCARDCONTEXT& context)
-    {
-        // Ensure the Smartcard API handle is still valid
-        ensureValidContext(context);
-
-        QList<QString> readers_list;
-        SCUINT dwReaders = 0;
-
-        // Read size of required string buffer
-        // OSX does not support auto-allocate
-        auto rv = SCardListReaders(context, nullptr, nullptr, &dwReaders);
-        if (rv != SCARD_S_SUCCESS) {
-            return readers_list;
-        }
-        if (dwReaders == 0 || dwReaders > 16384) { // max 16kb
-            return readers_list;
-        }
-        char* mszReaders = new char[dwReaders + 2];
-
-        rv = SCardListReaders(context, nullptr, mszReaders, &dwReaders);
-        if (rv == SCARD_S_SUCCESS) {
-            char* readhead = mszReaders;
-            // Names are separated by a null byte
-            // The list is terminated by two null bytes
-            while (*readhead != '\0') {
-                QString reader = QString::fromUtf8(readhead);
-                readers_list.append(reader);
-                readhead += reader.size() + 1;
-            }
-        }
-
-        delete[] mszReaders;
-        return readers_list;
-    }
-
-    /***
-     * @brief Reads the status of a smartcard handle
-     *
-     * This function does not actually transmit data,
-     * instead it only reads the OS API state
-     *
-     * @param handle Smartcard handle
-     * @param dwProt Protocol currently used
-     * @param pioSendPci Pointer to the PCI header used for sending
-     *
-     * @return SCARD_S_SUCCESS on success
-     */
-    RETVAL getCardStatus(SCARDHANDLE handle, SCUINT& dwProt, const SCARD_IO_REQUEST*& pioSendPci)
-    {
-        char pbReader[MAX_READERNAME] = {0}; // Name of the reader the card is placed in
-        SCUINT dwReaderLen = sizeof(pbReader); // String length of the reader name
-        SCUINT dwState = 0; // Unused. Contents differ depending on API implementation.
-        uint8_t pbAtr[MAX_ATR_SIZE] = {0}; // ATR record
-        SCUINT dwAtrLen = sizeof(pbAtr); // ATR record size
-
-        auto rv = SCardStatus(handle, pbReader, &dwReaderLen, &dwState, &dwProt, pbAtr, &dwAtrLen);
-        if (rv == SCARD_S_SUCCESS) {
-            switch (dwProt) {
-            case SCARD_PROTOCOL_T0:
-                pioSendPci = SCARD_PCI_T0;
-                break;
-            case SCARD_PROTOCOL_T1:
-                pioSendPci = SCARD_PCI_T1;
-                break;
-            default:
-                // This should not happen during normal use
-                rv = SCARD_E_PROTO_MISMATCH;
-                break;
-            }
-        }
-
-        return rv;
-    }
-
-    /***
-     * @brief Executes a sequence of transmissions, and retries it if the card is reset during transmission
-     *
-     * A card not opened in exclusive mode (like here) can be reset by another process.
-     * The application has to acknowledge the reset and retransmit the transaction.
-     *
-     * @param handle Smartcard handle
-     * @param atomic_action Lambda that contains the sequence to be executed as a transaction. Expected to return
-     * SCARD_S_SUCCESS on success.
-     *
-     * @return SCARD_S_SUCCESS on success
-     */
-    RETVAL transactRetry(SCARDHANDLE handle, const std::function<RETVAL()>& atomic_action)
-    {
-        SCUINT dwProt = SCARD_PROTOCOL_UNDEFINED;
-        const SCARD_IO_REQUEST* pioSendPci = nullptr;
-        auto rv = getCardStatus(handle, dwProt, pioSendPci);
-        if (rv == SCARD_S_SUCCESS) {
-            // Begin a transaction. This locks out any other process from interfacing with the card
-            rv = SCardBeginTransaction(handle);
-            if (rv == SCARD_S_SUCCESS) {
-                int i;
-                for (i = 4; i > 0; i--) { // 3 tries for reconnecting after reset
-                    // Run the lambda payload and store its return code
-                    RETVAL rv_act = atomic_action();
-                    if (rv_act == SCARD_W_RESET_CARD) {
-                        // The card was reset during the transmission.
-                        SCUINT dwProt_new = SCARD_PROTOCOL_UNDEFINED;
-                        // Acknowledge the reset and reestablish the connection and handle
-                        rv = SCardReconnect(handle, SCARD_SHARE_SHARED, dwProt, SCARD_LEAVE_CARD, &dwProt_new);
-// On Windows, the transaction has to be re-started.
-// On Linux and OSX (which use pcsc-lite), the transaction continues to be valid.
-#ifdef Q_OS_WIN
-                        if (rv == SCARD_S_SUCCESS) {
-                            rv = SCardBeginTransaction(handle);
-                        }
-#endif
-                        qDebug("Smartcard was reset and had to be reconnected");
-                    } else {
-                        // This does not mean that the payload returned SCARD_S_SUCCESS
-                        //  just that the card was not reset during communication.
-                        // Return the return code of the payload function
-                        rv = rv_act;
-                        break;
-                    }
-                }
-                if (i == 0) {
-                    rv = SCARD_W_RESET_CARD;
-                    qDebug("Smartcard was reset and failed to reconnect after 3 tries");
-                }
-            }
-        }
-
-        // This could return SCARD_W_RESET_CARD or SCARD_E_NOT_TRANSACTED, but we dont care
-        // because then the transaction would have already been ended implicitly
-        SCardEndTransaction(handle, SCARD_LEAVE_CARD);
-
-        return rv;
-    }
-
-    /***
-     * @brief Transmits a buffer to the smartcard, and reads the response
-     *
-     * @param handle Smartcard handle
-     * @param pbSendBuffer Pointer to the data to be sent
-     * @param dwSendLength Size of the data to be sent in bytes
-     * @param pbRecvBuffer Pointer to the data to be received
-     * @param dwRecvLength Size of the data to be received in bytes
-     *
-     * @return SCARD_S_SUCCESS on success
-     */
-    RETVAL transmit(SCARDHANDLE handle,
-                    const uint8_t* pbSendBuffer,
-                    SCUINT dwSendLength,
-                    uint8_t* pbRecvBuffer,
-                    SCUINT& dwRecvLength)
-    {
-        SCUINT dwProt = SCARD_PROTOCOL_UNDEFINED;
-        const SCARD_IO_REQUEST* pioSendPci = nullptr;
-        auto rv = getCardStatus(handle, dwProt, pioSendPci);
-        if (rv == SCARD_S_SUCCESS) {
-            // Write to and read from the card
-            // pioRecvPci is nullptr because we do not expect any PCI response header
-            const SCUINT dwRecvBufferSize = dwRecvLength;
-            rv = SCardTransmit(handle, pioSendPci, pbSendBuffer, dwSendLength, nullptr, pbRecvBuffer, &dwRecvLength);
-
-            if (dwRecvLength < 2) {
-                // Any valid response should be at least 2 bytes (response status)
-                // However the protocol itself could fail
-                return SCARD_E_UNEXPECTED;
-            }
-
-            uint8_t SW1 = pbRecvBuffer[dwRecvLength - 2];
-            // Check for the MoreDataAvailable SW1 code. If present, send GetResponse command repeatedly, until success
-            // SW, or filling the receiving buffer.
-            if (SW1 == SW_MORE_DATA_HIGH) {
-                while (true) {
-                    if (dwRecvBufferSize < dwRecvLength) {
-                        // No free buffer space remaining
-                        return SCARD_E_UNEXPECTED;
-                    }
-                    // Overwrite Status Word in the receiving buffer
-                    dwRecvLength -= 2;
-                    SCUINT dwRecvLength_sr = dwRecvBufferSize - dwRecvLength; // at least 2 bytes for SW are available
-                    const uint8_t bRecvDataSize =
-                        qBound(static_cast<SCUINT>(0), dwRecvLength_sr - 2, static_cast<SCUINT>(255));
-                    uint8_t pbSendBuffer_sr[] = {CLA_ISO, INS_GET_RESPONSE, 0, 0, bRecvDataSize};
-                    rv = SCardTransmit(handle,
-                                       pioSendPci,
-                                       pbSendBuffer_sr,
-                                       sizeof pbSendBuffer_sr,
-                                       nullptr,
-                                       pbRecvBuffer + dwRecvLength,
-                                       &dwRecvLength_sr);
-
-                    // Check if any new data are received. Break if the smart card's status is other than success,
-                    // or no new bytes were received.
-                    if (!(rv == SCARD_S_SUCCESS && dwRecvLength_sr >= 2)) {
-                        break;
-                    }
-
-                    dwRecvLength += dwRecvLength_sr;
-                    SW1 = pbRecvBuffer[dwRecvLength - 2];
-                    // Break the loop if there is no continuation status
-                    if (SW1 != SW_MORE_DATA_HIGH) {
-                        break;
-                    }
-                }
-            }
-
-            if (rv == SCARD_S_SUCCESS) {
-                if (dwRecvLength < 2) {
-                    // Any valid response should be at least 2 bytes (response status)
-                    // However the protocol itself could fail
-                    rv = SCARD_E_UNEXPECTED;
-                } else {
-                    const uint8_t SW_HIGH = pbRecvBuffer[dwRecvLength - 2];
-                    const uint8_t SW_LOW = pbRecvBuffer[dwRecvLength - 1];
-                    if (SW_HIGH == SW_OK_HIGH && SW_LOW == SW_OK_LOW) {
-                        rv = SCARD_S_SUCCESS;
-                    } else if (SW_HIGH == SW_PRECOND_HIGH && SW_LOW == SW_PRECOND_LOW) {
-                        // This happens if the key requires eg. a button press or if the applet times out
-                        // Solution: Re-present the card to the reader
-                        rv = SCARD_W_CARD_NOT_AUTHENTICATED;
-                    } else if ((SW_HIGH == SW_NOTFOUND_HIGH && SW_LOW == SW_NOTFOUND_LOW) || SW_HIGH == SW_UNSUP_HIGH) {
-                        // This happens eg. during a select command when the AID is not found
-                        rv = SCARD_E_FILE_NOT_FOUND;
-                    } else {
-                        rv = SCARD_E_UNEXPECTED;
-                    }
-                }
-            }
-        }
-
-        return rv;
-    }
-
-    /***
-     * @brief Transmits an applet selection APDU to select the challenge-response applet
-     *
-     * @param handle Smartcard handle and applet ID bytestring pair
-     *
-     * @return SCARD_S_SUCCESS on success
-     */
-    RETVAL selectApplet(const SCardAID& handle)
-    {
-        uint8_t pbSendBuffer_head[5] = {
-            CLA_ISO, INS_SELECT, SEL_APP_AID, 0, static_cast<uint8_t>(handle.second.size())};
-        auto pbSendBuffer = new uint8_t[5 + handle.second.size()];
-        memcpy(pbSendBuffer, pbSendBuffer_head, 5);
-        memcpy(pbSendBuffer + 5, handle.second.constData(), handle.second.size());
-        // Give it more space in case custom implementations have longer answer to select
-        uint8_t pbRecvBuffer[64] = {
-            0}; // 3 bytes version, 1 byte program counter, other stuff for various implementations, 2 bytes status
-        SCUINT dwRecvLength = sizeof pbRecvBuffer;
-
-        auto rv = transmit(handle.first, pbSendBuffer, 5 + handle.second.size(), pbRecvBuffer, dwRecvLength);
-
-        delete[] pbSendBuffer;
-
-        return rv;
-    }
-
     /***
      * @brief Finds the AID a card uses by checking a list of AIDs
      *
@@ -358,9 +39,9 @@ namespace
     {
         for (const auto& aid : aid_codes) {
             // Ensure the transmission is retransmitted after card resets
-            auto rv = transactRetry(handle, [&handle, &aid]() {
+            auto rv = PCSCUtils::transactRetry(handle, [&handle, &aid]() {
                 // Try to select the card using the specified AID
-                return selectApplet({handle, aid});
+                return PCSCUtils::selectApplet({handle, aid});
             });
             if (rv == SCARD_S_SUCCESS) {
                 result.first = handle;
@@ -382,9 +63,9 @@ namespace
     RETVAL getSerial(const SCardAID& handle, unsigned int& serial)
     {
         // Ensure the transmission is retransmitted after card resets
-        return transactRetry(handle.first, [&handle, &serial]() {
+        return PCSCUtils::transactRetry(handle.first, [&handle, &serial]() {
             // Ensure that the card is always selected before sending the command
-            auto rv = selectApplet(handle);
+            auto rv = PCSCUtils::selectApplet(handle);
             if (rv != SCARD_S_SUCCESS) {
                 return rv;
             }
@@ -393,7 +74,7 @@ namespace
             uint8_t pbRecvBuffer[6] = {0}; // 4 bytes serial, 2 bytes status
             SCUINT dwRecvLength = 6;
 
-            rv = transmit(handle.first, pbSendBuffer, 5, pbRecvBuffer, dwRecvLength);
+            rv = PCSCUtils::transmit(handle.first, pbSendBuffer, 5, pbRecvBuffer, dwRecvLength);
             if (rv == SCARD_S_SUCCESS && dwRecvLength >= 4) {
                 // The serial number is encoded MSB first
                 serial = (pbRecvBuffer[0] << 24) + (pbRecvBuffer[1] << 16) + (pbRecvBuffer[2] << 8) + (pbRecvBuffer[3]);
@@ -419,12 +100,12 @@ namespace
                          SCardAID* handle)
     {
         // Ensure the Smartcard API handle is still valid
-        auto rv = ensureValidContext(context);
+        auto rv = PCSCUtils::ensureValidContext(context);
         if (rv != SCARD_S_SUCCESS) {
             return rv;
         }
 
-        auto readers_list = getReaders(context);
+        auto readers_list = PCSCUtils::getReaders(context);
 
         // Iterate all connected readers
         foreach (const QString& reader_name, readers_list) {
@@ -485,8 +166,8 @@ namespace
     RETVAL getHMAC(const SCardAID& handle, uint8_t slot_cmd, const uint8_t input[64], uint8_t output[20])
     {
         // Ensure the transmission is retransmitted after card resets
-        return transactRetry(handle.first, [&handle, &slot_cmd, &input, &output]() {
-            auto rv = selectApplet(handle);
+        return PCSCUtils::transactRetry(handle.first, [&handle, &slot_cmd, &input, &output]() {
+            auto rv = PCSCUtils::selectApplet(handle);
 
             // Ensure that the card is always selected before sending the command
             if (rv != SCARD_S_SUCCESS) {
@@ -498,7 +179,7 @@ namespace
             uint8_t pbRecvBuffer[22] = {0}; // 20 bytes hmac, 2 bytes status
             SCUINT dwRecvLength = 22;
 
-            rv = transmit(handle.first, pbSendBuffer, 5 + 64, pbRecvBuffer, dwRecvLength);
+            rv = PCSCUtils::transmit(handle.first, pbSendBuffer, 5 + 64, pbRecvBuffer, dwRecvLength);
             if (rv == SCARD_S_SUCCESS && dwRecvLength >= 20) {
                 memcpy(output, pbRecvBuffer, 20);
             }
@@ -518,7 +199,7 @@ namespace
 YubiKeyInterfacePCSC::YubiKeyInterfacePCSC()
     : YubiKeyInterface()
 {
-    if (ensureValidContext(m_sc_context) != SCARD_S_SUCCESS) {
+    if (PCSCUtils::ensureValidContext(m_sc_context) != SCARD_S_SUCCESS) {
         qDebug("YubiKey: Failed to establish PC/SC context.");
     } else {
         m_initialized = true;
@@ -553,7 +234,7 @@ YubiKey::KeyMap YubiKeyInterfacePCSC::findValidKeys(int& connectedKeys)
     YubiKey::KeyMap foundKeys;
 
     // Connect to each reader and look for cards
-    for (const auto& reader_name : getReaders(m_sc_context)) {
+    for (const auto& reader_name : PCSCUtils::getReaders(m_sc_context)) {
         /* Some Yubikeys present their PCSC interface via USB as well
            Although this would not be a problem in itself,
            we filter these connections because in USB mode,

@@ -19,28 +19,14 @@
 #define KEEPASSX_YUBIKEY_INTERFACE_PCSC_H
 
 #include "YubiKeyInterface.h"
+#include "gui/osutils/PCSCUtils.h"
 
-#include <winscard.h>
-
-#define CLA_ISO 0x00
-#define INS_SELECT 0xA4
-#define INS_GET_RESPONSE 0xC0
-#define SEL_APP_AID 0x04
-#define INS_API_REQ 0x01
-#define INS_STATUS 0x03
-#define CMD_GET_SERIAL 0x10
-#define CMD_HMAC_1 0x30
-#define CMD_HMAC_2 0x38
-#define SW_OK_HIGH 0x90
-#define SW_OK_LOW 0x00
-#define SW_PRECOND_HIGH 0x69
-#define SW_PRECOND_LOW 0x85
-#define SW_NOTFOUND_HIGH 0x6A
-#define SW_NOTFOUND_LOW 0x82
-#define SW_UNSUP_HIGH 0x6D
-#define SW_MORE_DATA_HIGH 0x61
-
-typedef QPair<SCARDHANDLE, QByteArray> SCardAID;
+// YubiKey-specific APDU constants
+constexpr uint8_t INS_API_REQ = 0x01;
+constexpr uint8_t INS_STATUS = 0x03;
+constexpr uint8_t CMD_GET_SERIAL = 0x10;
+constexpr uint8_t CMD_HMAC_1 = 0x30;
+constexpr uint8_t CMD_HMAC_2 = 0x38;
 
 /**
  * Singleton class to manage the PCSC interface to hardware key(s)

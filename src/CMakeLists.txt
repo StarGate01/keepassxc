@@ -277,7 +277,9 @@ if(WIN32)
 endif()
 
 if(WITH_XC_YUBIKEY)
-    list(APPEND gui_SOURCES gui/osutils/DeviceListener.cpp)
+    list(APPEND gui_SOURCES
+        gui/osutils/DeviceListener.cpp
+        gui/osutils/PCSCUtils.cpp)
     if(APPLE)
         list(APPEND gui_SOURCES gui/osutils/macutils/DeviceListenerMac.cpp)
     elseif(UNIX)
